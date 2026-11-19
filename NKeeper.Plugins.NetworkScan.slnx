@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="backend/NKeeper.Plugins.NetworkScan.csproj" />
+  <Project Path="tests/NKeeper.Plugins.NetworkScan.Tests.csproj" />
+</Solution>
