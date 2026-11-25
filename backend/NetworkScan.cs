@@ -274,7 +274,8 @@ internal sealed class NetworkScanJob(Guid userId, Subnet subnet, ILogger logger,
         var sshTask = open.Contains(22) ? NetworkProbes.SshBannerAsync(address, 22, ct) : Task.FromResult<string?>(null);
         var webPorts = open.Where(p => HttpPorts.Contains(p) || HttpsPorts.Contains(p)).Take(MaxWebPorts).ToList();
         var webTasks = webPorts.Select(p => NetworkProbes.WebAsync(address, p, HttpsPorts.Contains(p), ct)).ToList();
-        await Task.WhenAll([dnsTask, netBiosTask, sshTask, .. webTasks]);
+        var rdpTask = open.Contains(3389) ? NetworkProbes.RdpCertificateAsync(address, 3389, ct) : Task.FromResult<NetworkProbes.RdpAnswer?>(null);
+        await Task.WhenAll([dnsTask, netBiosTask, sshTask, rdpTask, .. webTasks]);
 
         if (await dnsTask is { } dns)
         {
@@ -333,6 +334,16 @@ internal sealed class NetworkScanJob(Guid userId, Subnet subnet, ILogger logger,
             foreach (var name in web.CertificateNames.Where(NetworkProbes.LooksLikeHostname))
             {
                 names.Add((name, $"certificate on port {webPorts[i]}"));
+            }
+        }
+
+        // 1.x: a Remote Desktop certificate names the machine, usually by its full DNS name.
+        if (await rdpTask is { } rdp)
+        {
+            details.Add($"Remote Desktop certificate: {rdp.Subject}");
+            foreach (var name in rdp.CertificateNames.Where(NetworkProbes.LooksLikeHostname))
+            {
+                names.Add((name, "Remote Desktop certificate"));
             }
         }
 
