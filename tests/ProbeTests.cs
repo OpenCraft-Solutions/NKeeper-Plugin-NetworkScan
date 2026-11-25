@@ -1,5 +1,8 @@
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace NKeeper.Plugins.NetworkScan.Tests;
@@ -120,6 +123,56 @@ public sealed class ProbeTests
         Assert.Equal(200, answer.Status);
         Assert.Equal("TestPrinter/2.1", answer.Server);
         Assert.Equal("Printer status", answer.Title);
+    }
+
+    [Fact]
+    public async Task RdpProbe_ReadsTheCertificateAfterTheNegotiation_AndGivesUpOnLegacySecurity()
+    {
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest("CN=ws01.corp.example", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var created = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        using var certificate = X509CertificateLoader.LoadPkcs12(created.Export(X509ContentType.Pfx), null);
+
+        Assert.Equal("ws01.corp.example", (await ServeRdpAsync(certificate, selected: 0x2))?.Subject);
+        Assert.Contains("ws01.corp.example", (await ServeRdpAsync(certificate, selected: 0x1))!.CertificateNames);
+        // A server that only offers standard RDP security answers without a protocol: nothing to read.
+        Assert.Null(await ServeRdpAsync(certificate, selected: 0));
+    }
+
+    /// <summary>A Remote Desktop server's start: the Connection Confirm with the chosen protocol, then TLS.</summary>
+    private static async Task<NetworkProbes.RdpAnswer?> ServeRdpAsync(X509Certificate2 certificate, uint selected)
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var serve = Task.Run(async () =>
+        {
+            using var socket = await listener.AcceptSocketAsync(Ct);
+            await using var stream = new NetworkStream(socket, ownsSocket: false);
+            var request = new byte[19];
+            await stream.ReadExactlyAsync(request, Ct);
+            Assert.Equal(NetworkProbes.RdpConnectionRequest(), request);
+            var confirm = new byte[19];
+            confirm[0] = 3;
+            confirm[3] = 19;
+            confirm[4] = 14;
+            confirm[5] = 0xD0;
+            confirm[11] = 0x02;
+            confirm[13] = 8;
+            BitConverter.GetBytes(selected).CopyTo(confirm, 15);
+            await stream.WriteAsync(confirm, Ct);
+            if (selected == 0)
+            {
+                return;
+            }
+
+            await using var tls = new SslStream(stream);
+            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate }, Ct);
+        }, Ct);
+
+        var answer = await NetworkProbes.RdpCertificateAsync(IPAddress.Loopback, port, Ct);
+        await serve;
+        return answer;
     }
 
     [Theory]

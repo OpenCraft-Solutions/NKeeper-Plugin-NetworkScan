@@ -3,7 +3,7 @@
   "description": "The network-scan plugin's frontend: the Scan network dialog.",
   "private": true,
   "license": "MIT",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",

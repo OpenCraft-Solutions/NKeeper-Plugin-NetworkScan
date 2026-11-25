@@ -10,10 +10,10 @@ It probes from the NKeeper server itself, with its own sockets, and carries no c
 
 **The network scan** (**Scan network**, above the host tree, for administrators): every address in an IPv4 subnet, a /20 at most, that the administrator enters or picks from the server's own networks.
 - It's loud, so it must be acknowledged first, and is audited as `network-scan.subnet`. Only one runs at a time on the server; it can be stopped, and is kept for its administrator for two hours after it ends.
-- An address is a machine when it answers a ping, answers or refuses a TCP connection on a discovery port, or resolves in the neighbour table. For each, it reads the open ports, the SSH banner, web servers' titles, headers and certificate names, the NetBIOS name and workgroup, reverse DNS, the ping's TTL and the MAC address's vendor.
+- An address is a machine when it answers a ping, answers or refuses a TCP connection on a discovery port, or resolves in the neighbour table. For each, it reads the open ports, the SSH banner, web servers' titles, headers and certificate names, the Remote Desktop certificate's names, the NetBIOS name and workgroup, reverse DNS, the ping's TTL and the MAC address's vendor.
 - The dialog matches each machine to an NKeeper host (by MAC address, else IP address, else hostname), and adds the ones the administrator ticks through core's own `POST /api/hosts`, with a service for each open port whose type is known.
 
-**Not yet:** 1.x's Remote Desktop certificate probe, which is core's desktop connector's.
+An address with Remote Desktop open is also asked for its certificate, as 1.x did: the RDP negotiation, then TLS only to read it. Its names count among the machine's.
 
 The plugin's ID is `network-scan`, and it is built in: it is signed with NKeeper's official key and installed with NKeeper. It can be turned off (§9.2). It needs SDK 1.14 (`>=1.14.0 <2.0.0`).
 

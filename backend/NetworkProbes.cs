@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.NetworkInformation;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -27,6 +29,7 @@ internal static partial class NetworkProbes
     private static readonly TimeSpan HttpTimeout = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan NetBiosTimeout = TimeSpan.FromSeconds(1.5);
     private static readonly TimeSpan DnsTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RdpTimeout = TimeSpan.FromSeconds(5);
 
     /// <returns>Whether the address answered an ICMP echo, and the reply's TTL when the platform reports it.</returns>
     public static async Task<(bool Answered, int? Ttl)> PingAsync(IPAddress address, TimeSpan timeout, CancellationToken cancellationToken)
@@ -163,6 +166,81 @@ internal static partial class NetworkProbes
             certificate?.Dispose();
             return null;
         }
+    }
+
+    /// <summary>A Remote Desktop server's TLS certificate: its subject and DNS names.</summary>
+    public sealed record RdpAnswer(string Subject, IReadOnlyList<string> CertificateNames);
+
+    /// <summary>
+    /// 1.x's Remote Desktop certificate probe, as core's desktop connector starts any RDP connection (MS-RDPBCGR
+    /// 1.3.1.1): an X.224 Connection Request asking for TLS or NLA, then a TLS handshake on the same socket, only to
+    /// read the certificate. Nothing else is sent, and nothing signs in.
+    /// </summary>
+    public static async Task<RdpAnswer?> RdpCertificateAsync(IPAddress address, int port, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(RdpTimeout);
+        try
+        {
+            using var client = new TcpClient(address.AddressFamily);
+            await client.ConnectAsync(address, port, timeout.Token);
+            await using var stream = client.GetStream();
+            await stream.WriteAsync(RdpConnectionRequest(), timeout.Token);
+            if (!await RdpOffersTlsAsync(stream, timeout.Token))
+            {
+                return null;
+            }
+
+            await using var tls = new SslStream(stream, leaveInnerStreamOpen: true);
+            await tls.AuthenticateAsClientAsync(
+                new SslClientAuthenticationOptions
+                {
+                    TargetHost = address.ToString(),
+                    // Only read: RDP servers' certificates are almost always self-signed.
+#pragma warning disable CA5359
+                    RemoteCertificateValidationCallback = static (_, _, _, _) => true,
+#pragma warning restore CA5359
+                },
+                timeout.Token);
+            using var certificate = new X509Certificate2(tls.RemoteCertificate!);
+            return new RdpAnswer(certificate.GetNameInfo(X509NameType.SimpleName, forIssuer: false), CertificateNames(certificate));
+        }
+        catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException or System.Security.Authentication.AuthenticationException or InvalidOperationException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return null;
+        }
+    }
+
+    /// <summary>TPKT + X.224 Connection Request + RDP_NEG_REQ for TLS and NLA.</summary>
+    internal static byte[] RdpConnectionRequest()
+    {
+        var packet = new byte[19];
+        packet[0] = 3; // TPKT version
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(2), 19);
+        packet[4] = 14; // X.224 length indicator
+        packet[5] = 0xE0; // Connection Request
+        packet[11] = 0x01; // TYPE_RDP_NEG_REQ
+        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(13), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(15), 0x1 | 0x2);
+        return packet;
+    }
+
+    /// <summary>Whether the X.224 Connection Confirm agrees to TLS or NLA (RDP_NEG_RSP with a protocol).</summary>
+    private static async Task<bool> RdpOffersTlsAsync(NetworkStream stream, CancellationToken cancellationToken)
+    {
+        var header = new byte[4];
+        await stream.ReadExactlyAsync(header, cancellationToken);
+        var length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
+        if (header[0] != 3 || length is < 11 or > 512)
+        {
+            return false;
+        }
+
+        var packet = new byte[length];
+        header.CopyTo(packet, 0);
+        await stream.ReadExactlyAsync(packet.AsMemory(4), cancellationToken);
+        return packet[5] == 0xD0 && packet.Length >= 19 && packet[11] == 0x02 && BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(15)) != 0;
     }
 
     /// <summary>The certificate's DNS names: its subject's common name and its subject alternative names.</summary>
